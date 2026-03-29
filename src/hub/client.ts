@@ -87,6 +87,47 @@ export class HubClient {
   }
 
   /**
+   * 同步工具定义到 Hub
+   * PUT {hubUrl}/bot/v1/app/tools
+   * @param tools - 工具定义数组
+   */
+  async syncTools(tools: Record<string, unknown>[]): Promise<void> {
+    const url = `${this.hubUrl}/bot/v1/app/tools`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(url, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.appToken}`,
+        },
+        body: JSON.stringify({ tools }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(
+          `[HubClient] 同步工具失败: status=${response.status}, body=${errorText}`,
+        );
+      } else {
+        console.log(`[HubClient] 工具同步成功，共 ${tools.length} 个`);
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        console.error("[HubClient] 同步工具超时（30s）");
+      } else {
+        console.error("[HubClient] 同步工具异常:", err);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * 发送通用消息
    * 底层统一的消息发送接口，其他 send* 方法均调用此方法
    *

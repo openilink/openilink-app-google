@@ -46,13 +46,87 @@ const { definitions: toolDefinitions, handlers: toolHandlers } =
 
 console.log(`[App] 已注册 ${toolDefinitions.length} 个 AI Tools`);
 
+// 将工具定义转换为 Hub 同步格式
+const toolsForHub = toolDefinitions.map((t) => ({
+  name: t.name,
+  description: t.description,
+  command: t.command,
+  parameters: t.parameters,
+}));
+
 // 初始化桥接模块
 const wxToGoogle = new WxToGoogle(googleClient, store);
 const googleToWx = new GoogleToWx(store);
 
 /**
- * 处理收到的 Hub 事件
- * 根据事件类型分发处理：消息 → 桥接，指令/工具 → 工具调用
+ * 向指定安装同步工具定义
+ */
+async function syncToolsToInstallation(hubUrl: string, appToken: string): Promise<void> {
+  const client = new HubClient(hubUrl, appToken);
+  await client.syncTools(toolsForHub);
+}
+
+/**
+ * 启动时遍历所有已有安装，同步工具定义
+ */
+async function syncToolsOnStartup(): Promise<void> {
+  const installations = store.getAllInstallations();
+  if (installations.length === 0) {
+    console.log("[App] 暂无安装记录，跳过启动时工具同步");
+    return;
+  }
+
+  console.log(`[App] 启动时同步工具到 ${installations.length} 个安装...`);
+  for (const inst of installations) {
+    try {
+      await syncToolsToInstallation(inst.hubUrl, inst.appToken);
+    } catch (err) {
+      console.error(`[App] 同步工具到安装 ${inst.id} 失败:`, err);
+    }
+  }
+}
+
+/**
+ * 处理 command 事件（同步/异步响应模式）
+ * 在 SYNC_DEADLINE 内完成则同步返回，超时则异步推送
+ */
+async function onCommand(event: HubEvent, installationId: string): Promise<string> {
+  const installation = store.getInstallation(installationId);
+  if (!installation) {
+    return `未找到安装: ${installationId}`;
+  }
+
+  const data = event.event?.data;
+  if (!data) return "缺少事件数据";
+
+  const command = data.command as string;
+  const args = (data.args as Record<string, any>) ?? {};
+  const userId = data.user_id as string;
+
+  const handler = toolHandlers.get(command);
+  if (!handler) {
+    return `未知指令: ${command}`;
+  }
+
+  try {
+    const ctx: ToolContext = {
+      installationId,
+      botId: event.bot.id,
+      userId,
+      traceId: event.trace_id,
+      args,
+    };
+    const result = await handler(ctx);
+    return result;
+  } catch (err) {
+    console.error(`[Event] 工具调用失败: ${command}`, err);
+    return `工具 ${command} 执行失败`;
+  }
+}
+
+/**
+ * 处理收到的非 command Hub 事件
+ * 根据事件类型分发处理：消息 → 桥接
  */
 async function onEvent(event: HubEvent, installationId: string): Promise<void> {
   const installation = store.getInstallation(installationId);
@@ -94,43 +168,6 @@ async function onEvent(event: HubEvent, installationId: string): Promise<void> {
       );
     }
   }
-
-  // 处理指令/工具调用事件
-  if (eventData.type === "command") {
-    const data = eventData.data;
-    const userId = data.user_id as string;
-    const command = data.command as string;
-    const args = (data.args as Record<string, any>) ?? {};
-
-    const handler = toolHandlers.get(command);
-    if (handler) {
-      const ctx: ToolContext = {
-        installationId,
-        botId: event.bot.id,
-        userId,
-        traceId: event.trace_id,
-        args,
-      };
-
-      try {
-        const result = await handler(ctx);
-        await hubClient.sendText(event.bot.id, userId, result);
-      } catch (err) {
-        console.error(`[Event] 工具调用失败: ${command}`, err);
-        await hubClient.sendText(
-          event.bot.id,
-          userId,
-          `工具 ${command} 执行失败`,
-        );
-      }
-    } else {
-      await hubClient.sendText(
-        event.bot.id,
-        userId,
-        `未知指令: ${command}`,
-      );
-    }
-  }
 }
 
 // 创建路由
@@ -153,14 +190,14 @@ router.get("/oauth/setup", (req, res) => {
   handleOAuthSetup(req, res, config);
 });
 
-// OAuth 回调
+// OAuth 回调（传入工具定义以便同步）
 router.get("/oauth/callback", (req, res) => {
-  return handleOAuthRedirect(req, res, config, store);
+  return handleOAuthRedirect(req, res, config, store, toolsForHub);
 });
 
-// Webhook 事件接收
+// Webhook 事件接收（传入 command 处理器）
 router.post("/webhook", (req, res) => {
-  return handleWebhook(req, res, store, onEvent);
+  return handleWebhook(req, res, store, onEvent, onCommand);
 });
 
 // 创建 HTTP 服务
@@ -181,6 +218,11 @@ server.listen(Number(config.port), () => {
   console.log(`[App] Hub 地址: ${config.hubUrl}`);
   console.log(`[App] 基础 URL: ${config.baseUrl}`);
   console.log(`[App] 已加载工具: ${toolDefinitions.map((t) => t.name).join(", ")}`);
+
+  // 启动后同步工具到所有已有安装
+  syncToolsOnStartup().catch((err) => {
+    console.error("[App] 启动时同步工具异常:", err);
+  });
 });
 
 // 优雅退出：停止轮询 + 关闭数据库 + 关闭 HTTP 服务
