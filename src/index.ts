@@ -21,7 +21,7 @@ import { manifest } from "./hub/manifest.js";
 import { collectAllTools } from "./tools/index.js";
 import { WxToGoogle } from "./bridge/wx-to-google.js";
 import { GoogleToWx } from "./bridge/google-to-wx.js";
-import type { HubEvent, ToolContext } from "./hub/types.js";
+import type { HubEvent, ToolContext, ToolResult } from "./hub/types.js";
 
 // 加载配置
 const config = loadConfig();
@@ -40,7 +40,7 @@ const googleClient = new GoogleClient(
   config.googleRedirectUri,
 );
 
-// 收集所有工具定义和处理器（共 18 个）
+// 收集所有工具定义和处理器
 const { definitions: toolDefinitions, handlers: toolHandlers } =
   collectAllTools(googleClient);
 
@@ -90,7 +90,7 @@ async function syncToolsOnStartup(): Promise<void> {
  * 处理 command 事件（同步/异步响应模式）
  * 在 SYNC_DEADLINE 内完成则同步返回，超时则异步推送
  */
-async function onCommand(event: HubEvent, installationId: string): Promise<string> {
+async function onCommand(event: HubEvent, installationId: string): Promise<string | ToolResult> {
   const installation = store.getInstallation(installationId);
   if (!installation) {
     return `未找到安装: ${installationId}`;
@@ -126,7 +126,7 @@ async function onCommand(event: HubEvent, installationId: string): Promise<strin
 
 /**
  * 处理收到的非 command Hub 事件
- * 根据事件类型分发处理：消息 → 桥接
+ * 根据事件类型分发处理：消息 -> 桥接
  */
 async function onEvent(event: HubEvent, installationId: string): Promise<void> {
   const installation = store.getInstallation(installationId);
@@ -150,22 +150,20 @@ async function onEvent(event: HubEvent, installationId: string): Promise<void> {
   // 处理消息事件 — 通过桥接转发到 Gmail
   if (eventData.type === "message") {
     const data = eventData.data;
-    const userId = data.user_id as string;
+    // 使用规范化的 to 解析逻辑
+    const to =
+      (data.group as { id?: string })?.id ??
+      (data.sender as { id?: string })?.id ??
+      (data.user_id as string) ??
+      (data.from as string) ??
+      "";
 
     try {
       await wxToGoogle.handleWxEvent(event, installation);
-      await hubClient.sendText(
-        event.bot.id,
-        userId,
-        "消息已转发至 Gmail 邮箱",
-      );
+      await hubClient.sendText(to, "消息已转发至 Gmail 邮箱", event.trace_id);
     } catch (err) {
       console.error("[Event] 消息桥接失败:", err);
-      await hubClient.sendText(
-        event.bot.id,
-        userId,
-        "消息转发失败，请稍后重试",
-      );
+      await hubClient.sendText(to, "消息转发失败，请稍后重试", event.trace_id);
     }
   }
 }
@@ -195,7 +193,7 @@ router.get("/oauth/callback", (req, res) => {
   return handleOAuthRedirect(req, res, config, store, toolsForHub);
 });
 
-// Webhook 事件接收（传入 command 处理器）
+// Webhook 事件接收（传入 onEvent 和 command 处理器）
 router.post("/webhook", (req, res) => {
   return handleWebhook(req, res, store, onEvent, onCommand);
 });

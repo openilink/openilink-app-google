@@ -94,5 +94,19 @@ export interface ToolContext {
   args: Record<string, any>;
 }
 
+/** Tool 处理结果 — 支持文本和媒体类型 */
+export interface ToolResult {
+  /** 回复文本 */
+  reply: string;
+  /** 回复类型，默认 text */
+  reply_type?: string;
+  /** 媒体 URL */
+  reply_url?: string;
+  /** 媒体 Base64 */
+  reply_base64?: string;
+  /** 文件名 */
+  reply_name?: string;
+}
+
 /** 工具处理函数类型 */
-export type ToolHandler = (ctx: ToolContext) => Promise<string>;
+export type ToolHandler = (ctx: ToolContext) => Promise<string | ToolResult>;

@@ -1,6 +1,11 @@
 /**
- * Hub OAuth 流程处理
- * 实现 OAuth PKCE 授权与回调，完成应用安装
+ * OAuth2 + PKCE 安装流程
+ *
+ * 1. Hub 访问 /oauth/setup → 本模块生成 PKCE，重定向到 Hub 授权页
+ *    查询参数: hub, app_id, bot_id, state(hub_state), return_url
+ * 2. Hub 授权完成后回调 /oauth/callback → 用 code + code_verifier 换取安装信息
+ *    Exchange: POST {hub}/api/apps/{appId}/oauth/exchange body: {code, code_verifier}
+ * 3. 成功后同步 tools + 重定向到 returnUrl
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -9,55 +14,62 @@ import type { Config } from "../config.js";
 import type { Store } from "../store.js";
 import { HubClient } from "./client.js";
 
-/** 临时存储 PKCE state -> code_verifier 的映射 */
+/** 临时存储 PKCE localState → {verifier, hub, appId, returnUrl} */
 const pendingStates = new Map<
   string,
-  { codeVerifier: string; expiresAt: number }
+  { verifier: string; hub: string; appId: string; returnUrl: string }
 >();
-
-/** 定期清理过期的 PKCE state（5 分钟过期） */
-function cleanExpiredStates(): void {
-  const now = Date.now();
-  for (const [key, value] of pendingStates) {
-    if (value.expiresAt < now) {
-      pendingStates.delete(key);
-    }
-  }
-}
 
 /**
  * 处理 OAuth 安装请求（/oauth/setup）
  * 生成 PKCE 参数并重定向到 Hub 授权页面
+ *
+ * 查询参数:
+ *  - hub: Hub 地址
+ *  - app_id: 应用 ID
+ *  - bot_id: Bot ID
+ *  - state: Hub 侧传来的 state（hub_state）
+ *  - return_url: 安装完成后重定向地址
  */
 export function handleOAuthSetup(
   req: IncomingMessage,
   res: ServerResponse,
   config: Config,
 ): void {
-  // 清理过期 state
-  cleanExpiredStates();
-
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
-  const hubUrl = url.searchParams.get("hub_url") ?? config.hubUrl;
+  const hub = url.searchParams.get("hub");
+  const appId = url.searchParams.get("app_id");
+  const botId = url.searchParams.get("bot_id") ?? "";
+  const hubState = url.searchParams.get("state") ?? "";
+  const returnUrl = url.searchParams.get("return_url") ?? "";
+
+  if (!hub || !appId) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "缺少 hub 或 app_id 参数" }));
+    return;
+  }
 
   // 生成 PKCE 参数
   const { codeVerifier, codeChallenge } = generatePKCE();
 
-  // 生成随机 state 防止 CSRF
-  const state = crypto.randomUUID();
-  pendingStates.set(state, {
-    codeVerifier,
-    expiresAt: Date.now() + 5 * 60 * 1000, // 5 分钟有效
+  // 生成本地随机 localState，缓存关键信息
+  const localState = crypto.randomUUID();
+  pendingStates.set(localState, {
+    verifier: codeVerifier,
+    hub,
+    appId,
+    returnUrl,
   });
 
-  // 构造 Hub 授权 URL
-  const redirectUri = `${config.baseUrl}/oauth/callback`;
-  const authUrl = new URL(`${hubUrl}/oauth/authorize`);
-  authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("redirect_uri", redirectUri);
-  authUrl.searchParams.set("state", state);
+  // 5 分钟后自动清理，防止内存泄漏
+  setTimeout(() => pendingStates.delete(localState), 5 * 60 * 1000);
+
+  // 构造 Hub 授权 URL: {hub}/api/apps/{appId}/oauth/authorize
+  const authUrl = new URL(`/api/apps/${appId}/oauth/authorize`, hub);
+  if (botId) authUrl.searchParams.set("bot_id", botId);
+  authUrl.searchParams.set("state", localState);
   authUrl.searchParams.set("code_challenge", codeChallenge);
-  authUrl.searchParams.set("code_challenge_method", "S256");
+  if (hubState) authUrl.searchParams.set("hub_state", hubState);
 
   // 重定向到 Hub 授权页面
   res.writeHead(302, { Location: authUrl.toString() });
@@ -67,6 +79,10 @@ export function handleOAuthSetup(
 /**
  * 处理 OAuth 回调（/oauth/callback）
  * 使用授权码 + code_verifier 换取安装信息并持久化
+ *
+ * 查询参数:
+ *  - code: 授权码
+ *  - state: 之前传出的 localState
  */
 export async function handleOAuthRedirect(
   req: IncomingMessage,
@@ -86,7 +102,7 @@ export async function handleOAuthRedirect(
     return;
   }
 
-  // 验证 state 并取出 code_verifier
+  // 验证 state 并取出缓存信息
   const pending = pendingStates.get(state);
   if (!pending) {
     res.writeHead(400, { "Content-Type": "application/json" });
@@ -95,25 +111,18 @@ export async function handleOAuthRedirect(
   }
   pendingStates.delete(state);
 
-  // 检查是否过期
-  if (pending.expiresAt < Date.now()) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "state 已过期，请重新授权" }));
-    return;
-  }
-
   try {
-    // 使用授权码换取安装令牌
-    const tokenUrl = `${config.hubUrl}/oauth/token`;
-    const tokenRes = await fetch(tokenUrl, {
+    // 用 code + code_verifier 换取安装信息
+    // POST {hub}/api/apps/{appId}/oauth/exchange
+    const exchangeUrl = `${pending.hub.replace(/\/+$/, "")}/api/apps/${pending.appId}/oauth/exchange`;
+    const tokenRes = await fetch(exchangeUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        grant_type: "authorization_code",
         code,
-        redirect_uri: `${config.baseUrl}/oauth/callback`,
-        code_verifier: pending.codeVerifier,
+        code_verifier: pending.verifier,
       }),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!tokenRes.ok) {
@@ -135,7 +144,7 @@ export async function handleOAuthRedirect(
     // 保存安装信息到数据库
     store.saveInstallation({
       id: tokenData.installation_id,
-      hubUrl: config.hubUrl,
+      hubUrl: pending.hub,
       appId: tokenData.app_id,
       botId: tokenData.bot_id,
       appToken: tokenData.app_token,
@@ -147,22 +156,28 @@ export async function handleOAuthRedirect(
       `[OAuth] 安装成功: installation_id=${tokenData.installation_id}`,
     );
 
-    // OAuth 完成后同步工具定义到 Hub
+    // 成功后同步工具定义到 Hub
     if (tools && tools.length > 0) {
-      const hubClient = new HubClient(config.hubUrl, tokenData.app_token);
+      const hubClient = new HubClient(pending.hub, tokenData.app_token);
       await hubClient.syncTools(tools).catch((err) => {
         console.error("[OAuth] 同步工具失败:", err);
       });
     }
 
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        ok: true,
-        message: "安装成功",
-        installation_id: tokenData.installation_id,
-      }),
-    );
+    // 重定向到 returnUrl（如果有的话），否则返回 JSON
+    if (pending.returnUrl) {
+      res.writeHead(302, { Location: pending.returnUrl });
+      res.end();
+    } else {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          message: "安装成功",
+          installation_id: tokenData.installation_id,
+        }),
+      );
+    }
   } catch (err) {
     console.error("[OAuth] 回调处理异常:", err);
     res.writeHead(500, { "Content-Type": "application/json" });
