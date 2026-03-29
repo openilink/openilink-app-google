@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  app-google:
+    build: .
+    container_name: openilink-app-google
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    volumes:
+      - google-data:/data
+    environment:
+      - HUB_URL=${HUB_URL}
+      - BASE_URL=${BASE_URL}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REFRESH_TOKEN=${GOOGLE_REFRESH_TOKEN}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - DB_PATH=/data/google.db
+      - PORT=8086
+
+volumes:
+  google-data:
