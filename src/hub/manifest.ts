@@ -15,6 +15,8 @@ export interface AppManifest {
   description: string;
   /** 订阅的事件类型列表 */
   events: string[];
+  /** 所需权限范围 */
+  scopes: string[];
   /** 配置项 JSON Schema */
   config_schema: Record<string, unknown>;
   /** 安装引导说明（Markdown） */
@@ -29,6 +31,7 @@ export const manifest: AppManifest = {
   description:
     "微信 ↔ Google Workspace 桥接，支持 Gmail、Calendar、Drive、Docs、Sheets",
   events: ["message", "command"],
+  scopes: ["tools:write", "config:read"],
   config_schema: {
     type: "object",
     properties: {
