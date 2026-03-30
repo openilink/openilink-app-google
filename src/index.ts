@@ -15,7 +15,7 @@ import { Router } from "./router.js";
 import { GoogleClient } from "./google/client.js";
 import { startGmailPolling } from "./google/event.js";
 import { handleOAuthSetup, handleOAuthRedirect } from "./hub/oauth.js";
-import { handleWebhook } from "./hub/webhook.js";
+import { handleWebhook, readBody } from "./hub/webhook.js";
 import { HubClient } from "./hub/client.js";
 import { manifest } from "./hub/manifest.js";
 import { collectAllTools } from "./tools/index.js";
@@ -191,6 +191,26 @@ router.get("/oauth/setup", (req, res) => {
 // OAuth 回调（传入工具定义以便同步）
 router.get("/oauth/callback", (req, res) => {
   return handleOAuthRedirect(req, res, config, store, toolsForHub);
+});
+
+// 模式 2: Hub 直接安装通知（POST /oauth/callback）
+router.post("/oauth/callback", async (req, res) => {
+  const body = await readBody(req);
+  const data = JSON.parse(body);
+  store.saveInstallation({
+    id: data.installation_id,
+    hubUrl: data.hub_url || config.hubUrl,
+    appId: "",
+    botId: data.bot_id || "",
+    appToken: data.app_token,
+    webhookSecret: data.webhook_secret,
+  });
+  // 异步同步 tools 到 Hub
+  new HubClient(data.hub_url || config.hubUrl, data.app_token)
+    .syncTools(toolsForHub)
+    .catch(console.error);
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ webhook_url: `${config.baseUrl}/webhook` }));
 });
 
 // Webhook 事件接收（传入 onEvent 和 command 处理器）
