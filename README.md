@@ -70,6 +70,28 @@ docker compose up -d
 | `DB_PATH` | 否 | `data/google.db` | SQLite 数据库文件路径 |
 | `PORT` | 否 | `8086` | HTTP 服务端口 |
 
+## 使用方式
+
+安装到 Bot 后，支持三种方式调用：
+
+### 自然语言（推荐）
+
+直接用微信跟 Bot 对话，Hub AI 会自动识别意图并调用对应功能：
+
+- "发封邮件给 alice@example.com 说项目进展"
+- "查一下明天的 Google 日程"
+- "帮我在 Google Drive 搜一下 Q1 报告"
+
+### 命令调用
+
+也可以使用 `/命令名 参数` 的格式直接调用：
+
+- `/send_email --to alice@example.com --subject 进展 --body 已完成`
+
+### AI 自动调用
+
+Hub AI 在多轮对话中会自动判断是否需要调用本 App 的功能，无需手动触发。
+
 ## 18 个 AI Tools
 
 ### Gmail（5 个）
