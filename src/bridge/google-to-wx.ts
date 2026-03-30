@@ -47,8 +47,8 @@ export class GoogleToWx {
         );
 
         // 尝试通过消息 ID 精确匹配（邮件回复场景）
-        const linkByMsg = this.store.getMessageLinkByGoogleMsg(event.messageId);
-        if (linkByMsg && linkByMsg.installationId === installation.id) {
+        const linkByMsg = this.store.getMessageLinkByGoogleMsg(event.messageId, installation.id);
+        if (linkByMsg) {
           await hubClient.sendText(
             installation.botId,
             linkByMsg.wxUserId,
@@ -108,8 +108,8 @@ export class GoogleToWx {
     // 由于 Store 目前只支持按 googleMsgId 查询，
     // 这里利用 threadId 与 googleThreadId 的对应关系
     // 注意：当前 Store 没有 byThreadId 查询方法，先通过 byMsgId 兜底
-    const link = this.store.getMessageLinkByGoogleMsg(threadId);
-    if (link && link.installationId === installationId) {
+    const link = this.store.getMessageLinkByGoogleMsg(threadId, installationId);
+    if (link) {
       return link;
     }
     return undefined;

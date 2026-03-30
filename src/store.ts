@@ -124,11 +124,11 @@ export class Store {
     });
   }
 
-  /** 根据 Google 消息 ID 查找关联记录 */
-  getMessageLinkByGoogleMsg(googleMsgId: string): MessageLink | undefined {
+  /** 根据 Google 消息 ID 和安装实例 ID 查找关联记录 */
+  getMessageLinkByGoogleMsg(googleMsgId: string, installationId: string): MessageLink | undefined {
     const row = this.db
-      .prepare("SELECT * FROM message_links WHERE google_msg_id = ? LIMIT 1")
-      .get(googleMsgId) as Record<string, any> | undefined;
+      .prepare("SELECT * FROM message_links WHERE google_msg_id = ? AND installation_id = ? LIMIT 1")
+      .get(googleMsgId, installationId) as Record<string, any> | undefined;
 
     if (!row) return undefined;
 
