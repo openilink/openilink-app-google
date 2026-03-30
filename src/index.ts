@@ -15,6 +15,7 @@ import { Router } from "./router.js";
 import { GoogleClient } from "./google/client.js";
 import { startGmailPolling } from "./google/event.js";
 import { handleOAuthSetup, handleOAuthRedirect } from "./hub/oauth.js";
+import { handleSettingsPage, handleSettingsVerify, handleSettingsSave } from "./hub/settings.js";
 import { handleWebhook, readBody } from "./hub/webhook.js";
 import { HubClient } from "./hub/client.js";
 import { manifest } from "./hub/manifest.js";
@@ -32,17 +33,27 @@ mkdirSync(dirname(config.dbPath), { recursive: true });
 // 初始化存储
 const store = new Store(config.dbPath);
 
-// 初始化 Google API 客户端
-const googleClient = new GoogleClient(
-  config.googleClientId,
-  config.googleClientSecret,
-  config.googleRefreshToken,
-  config.googleRedirectUri,
-);
+// 初始化 Google API 客户端（如果环境变量中配置了 Google 凭证）
+const hasGoogleCredentials = !!(config.googleClientId && config.googleClientSecret && config.googleRefreshToken);
+const googleClient = hasGoogleCredentials
+  ? new GoogleClient(
+      config.googleClientId,
+      config.googleClientSecret,
+      config.googleRefreshToken,
+      config.googleRedirectUri,
+    )
+  : null;
 
-// 收集所有工具定义和处理器
+if (googleClient) {
+  console.log("[App] Google 客户端初始化完成");
+} else {
+  console.log("[App] 未配置 Google 凭证，跳过默认客户端初始化（云端托管模式，用户安装时填写）");
+}
+
+// 收集所有工具定义和处理器（如果没有默认客户端则用空凭证客户端仅收集定义）
+const toolsSdkClient = googleClient ?? new GoogleClient("", "", "", "");
 const { definitions: toolDefinitions, handlers: toolHandlers } =
-  collectAllTools(googleClient);
+  collectAllTools(toolsSdkClient);
 
 console.log(`[App] 已注册 ${toolDefinitions.length} 个 AI Tools`);
 
@@ -54,9 +65,14 @@ const toolsForHub = toolDefinitions.map((t) => ({
   parameters: t.parameters,
 }));
 
-// 初始化桥接模块
-const wxToGoogle = new WxToGoogle(googleClient, store);
-const googleToWx = new GoogleToWx(store);
+// 设置 manifest 的 URL 字段
+manifest.oauth_setup_url = `${config.baseUrl}/oauth/setup`;
+manifest.oauth_redirect_url = `${config.baseUrl}/oauth/callback`;
+manifest.webhook_url = `${config.baseUrl}/webhook`;
+
+// 初始化桥接模块（仅在配置了 Google 凭证时启用）
+const wxToGoogle = googleClient ? new WxToGoogle(googleClient, store) : null;
+const googleToWx = googleClient ? new GoogleToWx(store) : null;
 
 /**
  * 向指定安装同步工具定义
@@ -155,7 +171,7 @@ async function onEvent(event: HubEvent, installationId: string): Promise<void> {
   );
 
   // 处理消息事件 — 通过桥接转发到 Gmail
-  if (eventData.type === "message") {
+  if (eventData.type === "message" && wxToGoogle) {
     const data = eventData.data;
     // 使用规范化的 to 解析逻辑
     const to =
@@ -190,9 +206,12 @@ router.get("/manifest", (_req, res) => {
   res.end(JSON.stringify(manifest));
 });
 
-// OAuth 安装流程
+// OAuth 安装流程（GET 显示配置表单，POST 提交后跳转授权）
 router.get("/oauth/setup", (req, res) => {
-  handleOAuthSetup(req, res, config);
+  return handleOAuthSetup(req, res, config);
+});
+router.post("/oauth/setup", (req, res) => {
+  return handleOAuthSetup(req, res, config);
 });
 
 // OAuth 回调（传入工具定义以便同步）
@@ -228,6 +247,17 @@ router.post("/oauth/callback", async (req, res) => {
   res.end(JSON.stringify({ webhook_url: `${config.baseUrl}/webhook` }));
 });
 
+// Settings 页面路由
+router.get("/settings", (req, res) => {
+  handleSettingsPage(req, res);
+});
+router.post("/settings/verify", (req, res) => {
+  return handleSettingsVerify(req, res, config, store);
+});
+router.post("/settings/save", (req, res) => {
+  return handleSettingsSave(req, res, config, store);
+});
+
 // Webhook 事件接收（传入 onEvent 和 command 处理器）
 router.post("/webhook", (req, res) => {
   return handleWebhook(req, res, store, onEvent, onCommand);
@@ -238,11 +268,17 @@ const server = createServer((req, res) => {
   router.handle(req, res);
 });
 
-// 启动 Gmail 轮询（Google Workspace 无实时推送，需轮询检测新邮件）
-const pollingHandle = startGmailPolling(googleClient, async (event) => {
-  const installations = store.getAllInstallations();
-  await googleToWx.handleNewMail(event, installations);
-});
+// 启动 Gmail 轮询（仅在配置了 Google 凭证时启动）
+let pollingHandle: { stop: () => void } | null = null;
+if (googleClient && googleToWx) {
+  const _googleToWx = googleToWx;
+  pollingHandle = startGmailPolling(googleClient, async (event) => {
+    const installations = store.getAllInstallations();
+    await _googleToWx.handleNewMail(event, installations);
+  });
+} else {
+  console.log("[App] 未配置 Google 凭证，跳过 Gmail 轮询");
+}
 
 // 启动 HTTP 服务
 server.listen(Number(config.port), () => {
@@ -261,7 +297,7 @@ server.listen(Number(config.port), () => {
 // 优雅退出：停止轮询 + 关闭数据库 + 关闭 HTTP 服务
 function shutdown(): void {
   console.log("[App] 正在关闭...");
-  pollingHandle.stop();
+  if (pollingHandle) pollingHandle.stop();
   store.close();
   server.close(() => {
     console.log("[App] 已退出");
